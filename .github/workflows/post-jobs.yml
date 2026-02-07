@@ -14,5 +14,7 @@ jobs:
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
-        run: |
-          echo "Slack bot connected successfully 🚀"
+       run: |
+  echo "Posting jobs to Slack…"
+  curl -s "https://remotive.com/api/remote-jobs?category=software-dev" > jobs.json
+  echo "Downloaded jobs from Remotive ✅"
