@@ -3,46 +3,119 @@ name: Post Canada Remote Tech Jobs
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 9 * * *" # daily at 9am UTC
+    - cron: "0 9 * * *" # 9am UTC daily
 
 jobs:
   post_jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Fetch remote tech jobs
-        run: |
-          curl -s https://remotive.com/api/remote-jobs?category=software-dev > jobs.json
-
-      - name: Validate JSON
-        run: |
-          jq . jobs.json > /dev/null || {
-            echo "❌ Invalid JSON received. Exiting safely."
-            exit 0
-          }
-
-      - name: Post jobs to Slack
+      - name: Post jobs to Slack (robust)
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }} # channel ID OR channel name without #
         run: |
-          echo "Posting jobs to Slack..."
+          python3 - <<'PY'
+          import os, time, json
+          from urllib.request import Request, urlopen
+          from urllib.error import URLError, HTTPError
 
-          jq -c '.jobs[:5][]' jobs.json | while read job; do
-            TITLE=$(echo "$job" | jq -r '.title')
-            COMPANY=$(echo "$job" | jq -r '.company_name')
-            URL=$(echo "$job" | jq -r '.url')
+          SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "").strip()
+          SLACK_CHANNEL = os.getenv("SLACK_CHANNEL", "").strip()
 
-            # Skip bad entries
-            [ "$TITLE" = "null" ] && continue
+          if not SLACK_BOT_TOKEN or not SLACK_CHANNEL:
+            print("❌ Missing SLACK_BOT_TOKEN or SLACK_CHANNEL in GitHub Secrets.")
+            raise SystemExit(1)
 
-            curl -s -X POST "https://slack.com/api/chat.postMessage" \
-              -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-              -H "Content-Type: application/json" \
-              --data "$(jq -n \
-                --arg channel "$SLACK_CHANNEL" \
-                --arg text "💼 *$TITLE*\n🏢 $COMPANY\n🔗 $URL" \
-                '{channel:$channel, text:$text}')"
+          JOBS_URL = "https://remotive.com/api/remote-jobs?category=software-dev"
 
-            sleep 1
-          done
+          def fetch_json_with_retries(url, retries=4, backoff=2):
+            last_err = None
+            for attempt in range(1, retries + 1):
+              try:
+                req = Request(url, headers={"Accept": "application/json", "User-Agent": "github-actions-bot"})
+                with urlopen(req, timeout=20) as resp:
+                  content_type = resp.headers.get("Content-Type", "")
+                  raw = resp.read().decode("utf-8", errors="replace").strip()
+
+                  # If it is not JSON, do not crash the workflow (exit safely)
+                  if "application/json" not in content_type and not raw.startswith("{"):
+                    print("⚠️ API did not return JSON (maybe HTML / blocked). Exiting safely.")
+                    print("First 300 chars:", raw[:300])
+                    return None
+
+                  try:
+                    return json.loads(raw)
+                  except json.JSONDecodeError:
+                    print("⚠️ JSON decode failed. Exiting safely.")
+                    print("First 300 chars:", raw[:300])
+                    return None
+
+              except (HTTPError, URLError) as e:
+                last_err = e
+                wait = backoff ** attempt
+                print(f"⚠️ Fetch attempt {attempt} failed: {e}. Retrying in {wait}s...")
+                time.sleep(wait)
+
+            print("❌ All fetch attempts failed:", last_err)
+            return None
+
+          def slack_post(text):
+            payload = json.dumps({"channel": SLACK_CHANNEL, "text": text}).encode("utf-8")
+            req = Request(
+              "https://slack.com/api/chat.postMessage",
+              data=payload,
+              headers={
+                "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
+                "Content-Type": "application/json; charset=utf-8"
+              },
+              method="POST"
+            )
+            with urlopen(req, timeout=20) as resp:
+              body = resp.read().decode("utf-8", errors="replace")
+              try:
+                data = json.loads(body)
+              except json.JSONDecodeError:
+                print("❌ Slack returned non-JSON:", body[:300])
+                return False, {"raw": body}
+
+              return data.get("ok", False), data
+
+          data = fetch_json_with_retries(JOBS_URL)
+          if not data:
+            # Safe exit so your Action does not keep “failing”
+            print("✅ Exiting safely (no valid jobs payload).")
+            raise SystemExit(0)
+
+          jobs = data.get("jobs", [])
+          if not isinstance(jobs, list) or not jobs:
+            print("✅ No jobs found. Exiting safely.")
+            raise SystemExit(0)
+
+          # Post the first 5 jobs
+          posted = 0
+          for job in jobs[:5]:
+            title = (job.get("title") or "").strip()
+            company = (job.get("company_name") or "").strip()
+            url = (job.get("url") or "").strip()
+
+            if not title or not url:
+              continue
+
+            text = f"💼 *{title}*\n🏢 {company}\n🔗 {url}"
+            ok, resp = slack_post(text)
+
+            if not ok:
+              print("❌ Slack post failed:", resp)
+              # Common reasons:
+              # - channel_not_found (wrong channel id/name)
+              # - not_in_channel (bot not added to channel)
+              # - missing_scope (token missing chat:write)
+              # We stop here so you see the error clearly in Actions logs
+              raise SystemExit(1)
+
+            posted += 1
+            time.sleep(1)
+
+          print(f"✅ Posted {posted} jobs successfully.")
+          PY
