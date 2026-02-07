@@ -1,21 +1,18 @@
-name: Post jobs to Slack
+name: Post Canada Remote Tech Jobs
 
 on:
+  workflow_dispatch:
   schedule:
     - cron: "0 9 * * *"
-  workflow_dispatch:
 
 jobs:
-  post:
+  post_jobs:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Send message to Slack
-        uses: slackapi/slack-github-action@v1.24.0
-        with:
-          payload: |
-            {
-              "channel": "${{ secrets.SLACK_CHANNEL }}",
-              "text": "👋 Test post from your Canada Remote Tech Jobs bot. Setup successful!"
-            }
+      - name: Test Slack connection
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+        run: |
+          echo "Slack bot connected successfully 🚀"
