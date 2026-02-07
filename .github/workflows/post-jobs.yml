@@ -3,119 +3,98 @@ name: Post Canada Remote Tech Jobs
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 9 * * *" # 9am UTC daily
+    # Runs daily at 09:00 UTC
+    - cron: "0 9 * * *"
 
 jobs:
   post_jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Post jobs to Slack (robust)
+      - name: Fetch Greenhouse jobs + post to Slack
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }} # channel ID OR channel name without #
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+
+          # ✅ EDIT THIS LIST (these are Greenhouse "board tokens")
+          # Example: if a company's Greenhouse URL is:
+          # https://boards.greenhouse.io/shopify  -> token is "shopify"
+          GREENHOUSE_BOARDS: "shopify github notion datadog"
+
+          # Filters: adjust if you want
+          # Matches: Remote + Canada keywords in location
+          LOCATION_REGEX: "(?i)(remote|canada|toronto|vancouver|montreal|calgary|ottawa)"
+
+          # How many jobs to post per run (max)
+          MAX_POSTS: "12"
+
         run: |
-          python3 - <<'PY'
-          import os, time, json
-          from urllib.request import Request, urlopen
-          from urllib.error import URLError, HTTPError
+          set -euo pipefail
 
-          SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "").strip()
-          SLACK_CHANNEL = os.getenv("SLACK_CHANNEL", "").strip()
+          echo "Boards: $GREENHOUSE_BOARDS"
+          echo "Location regex: $LOCATION_REGEX"
+          echo "Max posts: $MAX_POSTS"
 
-          if not SLACK_BOT_TOKEN or not SLACK_CHANNEL:
-            print("❌ Missing SLACK_BOT_TOKEN or SLACK_CHANNEL in GitHub Secrets.")
-            raise SystemExit(1)
+          # Temp files
+          OUT_TSV="$(mktemp)"
+          OUT_UNIQ="$(mktemp)"
 
-          JOBS_URL = "https://remotive.com/api/remote-jobs?category=software-dev"
+          # Collect jobs from all boards
+          for BOARD in $GREENHOUSE_BOARDS; do
+            echo "Fetching: $BOARD"
+            URL="https://boards-api.greenhouse.io/v1/boards/${BOARD}/jobs?content=true"
 
-          def fetch_json_with_retries(url, retries=4, backoff=2):
-            last_err = None
-            for attempt in range(1, retries + 1):
-              try:
-                req = Request(url, headers={"Accept": "application/json", "User-Agent": "github-actions-bot"})
-                with urlopen(req, timeout=20) as resp:
-                  content_type = resp.headers.get("Content-Type", "")
-                  raw = resp.read().decode("utf-8", errors="replace").strip()
+            JSON="$(mktemp)"
+            curl -sS -H "Accept: application/json" "$URL" -o "$JSON"
 
-                  # If it is not JSON, do not crash the workflow (exit safely)
-                  if "application/json" not in content_type and not raw.startswith("{"):
-                    print("⚠️ API did not return JSON (maybe HTML / blocked). Exiting safely.")
-                    print("First 300 chars:", raw[:300])
-                    return None
-
-                  try:
-                    return json.loads(raw)
-                  except json.JSONDecodeError:
-                    print("⚠️ JSON decode failed. Exiting safely.")
-                    print("First 300 chars:", raw[:300])
-                    return None
-
-              except (HTTPError, URLError) as e:
-                last_err = e
-                wait = backoff ** attempt
-                print(f"⚠️ Fetch attempt {attempt} failed: {e}. Retrying in {wait}s...")
-                time.sleep(wait)
-
-            print("❌ All fetch attempts failed:", last_err)
-            return None
-
-          def slack_post(text):
-            payload = json.dumps({"channel": SLACK_CHANNEL, "text": text}).encode("utf-8")
-            req = Request(
-              "https://slack.com/api/chat.postMessage",
-              data=payload,
-              headers={
-                "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
-                "Content-Type": "application/json; charset=utf-8"
-              },
-              method="POST"
-            )
-            with urlopen(req, timeout=20) as resp:
-              body = resp.read().decode("utf-8", errors="replace")
-              try:
-                data = json.loads(body)
-              except json.JSONDecodeError:
-                print("❌ Slack returned non-JSON:", body[:300])
-                return False, {"raw": body}
-
-              return data.get("ok", False), data
-
-          data = fetch_json_with_retries(JOBS_URL)
-          if not data:
-            # Safe exit so your Action does not keep “failing”
-            print("✅ Exiting safely (no valid jobs payload).")
-            raise SystemExit(0)
-
-          jobs = data.get("jobs", [])
-          if not isinstance(jobs, list) or not jobs:
-            print("✅ No jobs found. Exiting safely.")
-            raise SystemExit(0)
-
-          # Post the first 5 jobs
-          posted = 0
-          for job in jobs[:5]:
-            title = (job.get("title") or "").strip()
-            company = (job.get("company_name") or "").strip()
-            url = (job.get("url") or "").strip()
-
-            if not title or not url:
+            # Validate JSON (skip board safely if invalid)
+            if ! jq -e . "$JSON" >/dev/null 2>&1; then
+              echo "❌ Invalid JSON from board: $BOARD (skipping)"
               continue
+            fi
 
-            text = f"💼 *{title}*\n🏢 {company}\n🔗 {url}"
-            ok, resp = slack_post(text)
+            # Extract jobs as TSV: company(board) | title | location | url
+            # Filter by location regex to focus Canada/Remote
+            jq -r --arg company "$BOARD" --arg re "$LOCATION_REGEX" '
+              .jobs[]
+              | select((.location.name // "" ) | test($re))
+              | [
+                  $company,
+                  (.title // ""),
+                  (.location.name // ""),
+                  (.absolute_url // "")
+                ]
+              | @tsv
+            ' "$JSON" >> "$OUT_TSV" || true
+          done
 
-            if not ok:
-              print("❌ Slack post failed:", resp)
-              # Common reasons:
-              # - channel_not_found (wrong channel id/name)
-              # - not_in_channel (bot not added to channel)
-              # - missing_scope (token missing chat:write)
-              # We stop here so you see the error clearly in Actions logs
-              raise SystemExit(1)
+          # Deduplicate by URL, keep first occurrence
+          awk -F'\t' '!seen[$4]++' "$OUT_TSV" > "$OUT_UNIQ"
 
-            posted += 1
-            time.sleep(1)
+          COUNT=$(wc -l < "$OUT_UNIQ" | tr -d ' ')
+          echo "Found $COUNT matching jobs total."
 
-          print(f"✅ Posted {posted} jobs successfully.")
-          PY
+          if [ "$COUNT" -eq 0 ]; then
+            echo "No jobs matched filters. Exiting without posting."
+            exit 0
+          fi
+
+          # Limit posts
+          head -n "$MAX_POSTS" "$OUT_UNIQ" > "${OUT_UNIQ}.top"
+
+          # Build Slack message (single post)
+          TEXT="*🇨🇦 Remote / Canada Tech Jobs (Greenhouse)*\n"
+          while IFS=$'\t' read -r COMPANY TITLE LOCATION LINK; do
+            # Slack-friendly line
+            TEXT="${TEXT}• *${TITLE}* — ${COMPANY} (${LOCATION})\n${LINK}\n"
+          done < "${OUT_UNIQ}.top"
+
+          echo "Posting to Slack channel: $SLACK_CHANNEL"
+
+          # Post to Slack
+          curl -sS -X POST "https://slack.com/api/chat.postMessage" \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            --data "$(jq -n --arg channel "$SLACK_CHANNEL" --arg text "$TEXT" \
+              '{channel:$channel, text:$text}')" \
+            | jq -r '.ok as $ok | if $ok then "✅ Posted successfully" else "❌ Slack error: " + (.error // "unknown") end'
