@@ -3,98 +3,78 @@ name: Post Canada Remote Tech Jobs
 on:
   workflow_dispatch:
   schedule:
-    # Runs daily at 09:00 UTC
-    - cron: "0 9 * * *"
+    - cron: "0 9 * * *" # daily 9:00 UTC
 
 jobs:
   post_jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Fetch Greenhouse jobs + post to Slack
+      - name: Fetch Remotive jobs (Software Dev)
+        run: |
+          set -e
+          echo "Downloading jobs from Remotive..."
+          curl -sS -H "Accept: application/json" \
+            "https://remotive.com/api/remote-jobs?category=software-dev" \
+            -o jobs.json
+
+          echo "Saved jobs.json"
+          echo "First 300 chars:"
+          head -c 300 jobs.json || true
+          echo ""
+
+      - name: Validate JSON
+        run: |
+          set -e
+          jq . jobs.json > /dev/null
+          echo "✅ JSON is valid"
+          echo "Total jobs in feed:"
+          jq '.jobs | length' jobs.json
+
+      - name: Post Canada jobs to Slack (clean format)
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
-
-          # ✅ EDIT THIS LIST (these are Greenhouse "board tokens")
-          # Example: if a company's Greenhouse URL is:
-          # https://boards.greenhouse.io/shopify  -> token is "shopify"
-          GREENHOUSE_BOARDS: "shopify github notion datadog"
-
-          # Filters: adjust if you want
-          # Matches: Remote + Canada keywords in location
-          LOCATION_REGEX: "(?i)(remote|canada|toronto|vancouver|montreal|calgary|ottawa)"
-
-          # How many jobs to post per run (max)
-          MAX_POSTS: "12"
-
         run: |
-          set -euo pipefail
+          set -e
 
-          echo "Boards: $GREENHOUSE_BOARDS"
-          echo "Location regex: $LOCATION_REGEX"
-          echo "Max posts: $MAX_POSTS"
+          echo "Posting Canada jobs to Slack..."
 
-          # Temp files
-          OUT_TSV="$(mktemp)"
-          OUT_UNIQ="$(mktemp)"
+          # Build a safe TSV list: title, company, location, url
+          jq -r '
+            .jobs[]
+            | select(.candidate_required_location != null)
+            | select(.candidate_required_location | test("Canada"; "i"))
+            | [
+                (.title // ""),
+                (.company_name // ""),
+                (.candidate_required_location // ""),
+                (.url // "")
+              ]
+            | @tsv
+          ' jobs.json | head -n 10 > jobs_canada.tsv
 
-          # Collect jobs from all boards
-          for BOARD in $GREENHOUSE_BOARDS; do
-            echo "Fetching: $BOARD"
-            URL="https://boards-api.greenhouse.io/v1/boards/${BOARD}/jobs?content=true"
+          echo "Canada jobs found (top 10):"
+          cat jobs_canada.tsv || true
 
-            JSON="$(mktemp)"
-            curl -sS -H "Accept: application/json" "$URL" -o "$JSON"
+          # Post each line as a separate Slack message
+          while IFS=$'\t' read -r TITLE COMPANY LOCATION URL; do
+            [ -z "$TITLE" ] && continue
 
-            # Validate JSON (skip board safely if invalid)
-            if ! jq -e . "$JSON" >/dev/null 2>&1; then
-              echo "❌ Invalid JSON from board: $BOARD (skipping)"
-              continue
-            fi
+            MESSAGE="🇨🇦 *${TITLE}*
+          🏢 ${COMPANY}
+          📍 ${LOCATION}
+          🔗 Apply: ${URL}"
 
-            # Extract jobs as TSV: company(board) | title | location | url
-            # Filter by location regex to focus Canada/Remote
-            jq -r --arg company "$BOARD" --arg re "$LOCATION_REGEX" '
-              .jobs[]
-              | select((.location.name // "" ) | test($re))
-              | [
-                  $company,
-                  (.title // ""),
-                  (.location.name // ""),
-                  (.absolute_url // "")
-                ]
-              | @tsv
-            ' "$JSON" >> "$OUT_TSV" || true
-          done
+            curl -sS -X POST "https://slack.com/api/chat.postMessage" \
+              -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+              -H "Content-Type: application/json; charset=utf-8" \
+              --data "$(jq -n \
+                --arg channel "${SLACK_CHANNEL}" \
+                --arg text "${MESSAGE}" \
+                '{channel:$channel, text:$text}')"
 
-          # Deduplicate by URL, keep first occurrence
-          awk -F'\t' '!seen[$4]++' "$OUT_TSV" > "$OUT_UNIQ"
+            sleep 1
+          done < jobs_canada.tsv
 
-          COUNT=$(wc -l < "$OUT_UNIQ" | tr -d ' ')
-          echo "Found $COUNT matching jobs total."
-
-          if [ "$COUNT" -eq 0 ]; then
-            echo "No jobs matched filters. Exiting without posting."
-            exit 0
-          fi
-
-          # Limit posts
-          head -n "$MAX_POSTS" "$OUT_UNIQ" > "${OUT_UNIQ}.top"
-
-          # Build Slack message (single post)
-          TEXT="*🇨🇦 Remote / Canada Tech Jobs (Greenhouse)*\n"
-          while IFS=$'\t' read -r COMPANY TITLE LOCATION LINK; do
-            # Slack-friendly line
-            TEXT="${TEXT}• *${TITLE}* — ${COMPANY} (${LOCATION})\n${LINK}\n"
-          done < "${OUT_UNIQ}.top"
-
-          echo "Posting to Slack channel: $SLACK_CHANNEL"
-
-          # Post to Slack
-          curl -sS -X POST "https://slack.com/api/chat.postMessage" \
-            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-            -H "Content-Type: application/json; charset=utf-8" \
-            --data "$(jq -n --arg channel "$SLACK_CHANNEL" --arg text "$TEXT" \
-              '{channel:$channel, text:$text}')" \
-            | jq -r '.ok as $ok | if $ok then "✅ Posted successfully" else "❌ Slack error: " + (.error // "unknown") end'
+          echo "✅ Done"
