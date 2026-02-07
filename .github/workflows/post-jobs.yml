@@ -3,7 +3,7 @@ name: Post Canada Remote Tech Jobs
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 9 * * *" # Runs daily at 9am UTC
+    - cron: "0 9 * * *"
 
 jobs:
   post_jobs:
@@ -12,7 +12,20 @@ jobs:
     steps:
       - name: Fetch remote tech jobs
         run: |
-          curl -s "https://remotive.com/api/remote-jobs?category=software-dev" > jobs.json
+          curl -s -H "Accept: application/json" \
+          "https://remotive.com/api/remote-jobs?category=software-dev" \
+          -o jobs.json
+
+          echo "First 500 chars of response:"
+          head -c 500 jobs.json
+          echo ""
+
+      - name: Validate JSON
+        run: |
+          jq . jobs.json > /dev/null || {
+            echo "❌ Invalid JSON received. Exiting safely."
+            exit 0
+          }
 
       - name: Post jobs to Slack
         env:
@@ -21,12 +34,14 @@ jobs:
         run: |
           echo "Posting jobs to Slack..."
 
+          jq -c '.jobs | length' jobs.json
+
           jq -c '.jobs[:5][]' jobs.json | while read job; do
             TITLE=$(echo "$job" | jq -r '.title')
             COMPANY=$(echo "$job" | jq -r '.company_name')
             URL=$(echo "$job" | jq -r '.url')
 
-            curl -X POST "https://slack.com/api/chat.postMessage" \
+            curl -s -X POST "https://slack.com/api/chat.postMessage" \
               -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
               -H "Content-Type: application/json" \
               --data "{
