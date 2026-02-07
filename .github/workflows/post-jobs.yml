@@ -3,17 +3,26 @@ name: Post Canada Remote Tech Jobs
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 9 * * *"
+    - cron: "0 9 * * *"   # runs daily at 09:00 UTC
 
 jobs:
   post_jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Test Slack connection
+      - name: Post test message to Slack
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
         run: |
-          echo "Posting jobs to Slack..."
-          echo "✅ Slack secrets loaded successfully"
+          set -e
+          echo "Posting to channel: $SLACK_CHANNEL"
+
+          RESP=$(curl -sS -X POST "https://slack.com/api/chat.postMessage" \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-type: application/json; charset=utf-8" \
+            --data "{\"channel\":\"$SLACK_CHANNEL\",\"text\":\"✅ Test post from GitHub Actions (Canada Remote Tech Jobs Bot)\"}")
+
+          echo "Slack response: $RESP"
+
+          echo "$RESP" | grep -q '"ok":true' || (echo "Slack post failed" && exit 1)
