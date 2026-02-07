@@ -1,3 +1,26 @@
+name: Post Canada Remote Tech Jobs
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * *" # daily at 9am UTC
+
+jobs:
+  post_jobs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch remote tech jobs
+        run: |
+          curl -s https://remotive.com/api/remote-jobs?category=software-dev > jobs.json
+
+      - name: Validate JSON
+        run: |
+          jq . jobs.json > /dev/null || {
+            echo "❌ Invalid JSON received. Exiting safely."
+            exit 0
+          }
+
       - name: Post jobs to Slack
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
@@ -5,19 +28,20 @@
         run: |
           echo "Posting jobs to Slack..."
 
-          # Extract fields safely (no JSON parsing inside the loop)
-          jq -r '.jobs[:5][] | [.title, .company_name, .url] | @tsv' jobs.json |
-          while IFS=$'\t' read -r TITLE COMPANY URL; do
+          jq -c '.jobs[:5][]' jobs.json | while read job; do
+            TITLE=$(echo "$job" | jq -r '.title')
+            COMPANY=$(echo "$job" | jq -r '.company_name')
+            URL=$(echo "$job" | jq -r '.url')
 
-            # Skip empty lines just in case
-            [ -z "$TITLE" ] && continue
+            # Skip bad entries
+            [ "$TITLE" = "null" ] && continue
 
             curl -s -X POST "https://slack.com/api/chat.postMessage" \
               -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-              -H "Content-Type: application/json; charset=utf-8" \
+              -H "Content-Type: application/json" \
               --data "$(jq -n \
                 --arg channel "$SLACK_CHANNEL" \
-                --arg text "💻 *$TITLE*\n🏢 $COMPANY\n🔗 $URL" \
+                --arg text "💼 *$TITLE*\n🏢 $COMPANY\n🔗 $URL" \
                 '{channel:$channel, text:$text}')"
 
             sleep 1
