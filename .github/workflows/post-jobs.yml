@@ -3,26 +3,36 @@ name: Post Canada Remote Tech Jobs
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 9 * * *"   # runs daily at 09:00 UTC
+    - cron: "0 9 * * *" # Runs daily at 9am UTC
 
 jobs:
   post_jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Post test message to Slack
+      - name: Fetch remote tech jobs
+        run: |
+          curl -s "https://remotive.com/api/remote-jobs?category=software-dev" > jobs.json
+
+      - name: Post jobs to Slack
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
         run: |
-          set -e
-          echo "Posting to channel: $SLACK_CHANNEL"
+          echo "Posting jobs to Slack..."
 
-          RESP=$(curl -sS -X POST "https://slack.com/api/chat.postMessage" \
-            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-            -H "Content-type: application/json; charset=utf-8" \
-            --data "{\"channel\":\"$SLACK_CHANNEL\",\"text\":\"✅ Test post from GitHub Actions (Canada Remote Tech Jobs Bot)\"}")
+          jq -c '.jobs[:5][]' jobs.json | while read job; do
+            TITLE=$(echo "$job" | jq -r '.title')
+            COMPANY=$(echo "$job" | jq -r '.company_name')
+            URL=$(echo "$job" | jq -r '.url')
 
-          echo "Slack response: $RESP"
+            curl -X POST "https://slack.com/api/chat.postMessage" \
+              -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data "{
+                \"channel\": \"$SLACK_CHANNEL\",
+                \"text\": \"💻 *$TITLE*\\n🏢 $COMPANY\\n🔗 $URL\"
+              }"
 
-          echo "$RESP" | grep -q '"ok":true' || (echo "Slack post failed" && exit 1)
+            sleep 2
+          done
