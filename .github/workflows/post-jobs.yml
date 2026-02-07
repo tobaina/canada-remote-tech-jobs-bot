@@ -3,7 +3,8 @@ name: Post Canada Remote Tech Jobs
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 9 * * *" # daily 9:00 UTC
+    - cron: "0 9 * * *"   # 9:00 AM UTC – main morning post
+    - cron: "0 16 * * *"  # 4:00 PM UTC – afternoon catch-up
 
 jobs:
   post_jobs:
@@ -67,7 +68,7 @@ jobs:
           🔗 Apply: ${URL}"
 
             curl -sS -X POST "https://slack.com/api/chat.postMessage" \
-              -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+              -H "Authorization: ${SLACK_BOT_TOKEN}" \
               -H "Content-Type: application/json; charset=utf-8" \
               --data "$(jq -n \
                 --arg channel "${SLACK_CHANNEL}" \
