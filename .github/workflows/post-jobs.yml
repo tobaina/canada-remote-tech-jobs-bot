@@ -1,10 +1,10 @@
-name: Post Canada Remote Tech Jobs
+name: Post Remote Tech Jobs (Global)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 9 * * *"   # 9:00 AM UTC – main morning post
-    - cron: "0 16 * * *"  # 4:00 PM UTC – afternoon catch-up
+    - cron: "0 9 * * *"    # 9:00 UTC
+    - cron: "0 15 * * *"   # 15:00 UTC (second daily run)
 
 jobs:
   post_jobs:
@@ -32,43 +32,40 @@ jobs:
           echo "Total jobs in feed:"
           jq '.jobs | length' jobs.json
 
-      - name: Post Canada jobs to Slack (clean format)
+      - name: Post jobs to Slack (Global Clean Format)
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
         run: |
           set -e
 
-          echo "Posting Canada jobs to Slack..."
+          echo "Posting global jobs to Slack..."
 
-          # Build a safe TSV list: title, company, location, url
+          # Extract safe TSV: title, company, location, url
           jq -r '
             .jobs[]
-            | select(.candidate_required_location != null)
-            | select(.candidate_required_location | test("Canada"; "i"))
             | [
                 (.title // ""),
                 (.company_name // ""),
-                (.candidate_required_location // ""),
+                (.candidate_required_location // "Remote"),
                 (.url // "")
               ]
             | @tsv
-          ' jobs.json | head -n 10 > jobs_canada.tsv
+          ' jobs.json | head -n 10 > jobs_global.tsv
 
-          echo "Canada jobs found (top 10):"
-          cat jobs_canada.tsv || true
+          echo "Top 10 jobs:"
+          cat jobs_global.tsv || true
 
-          # Post each line as a separate Slack message
           while IFS=$'\t' read -r TITLE COMPANY LOCATION URL; do
             [ -z "$TITLE" ] && continue
 
-            MESSAGE="🇨🇦 *${TITLE}*
-          🏢 ${COMPANY}
-          📍 ${LOCATION}
-          🔗 Apply: ${URL}"
+            MESSAGE="🌍 *${TITLE}*
+🏢 ${COMPANY}
+📍 ${LOCATION}
+🔗 Apply: ${URL}"
 
             curl -sS -X POST "https://slack.com/api/chat.postMessage" \
-              -H "Authorization: ${SLACK_BOT_TOKEN}" \
+              -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
               -H "Content-Type: application/json; charset=utf-8" \
               --data "$(jq -n \
                 --arg channel "${SLACK_CHANNEL}" \
@@ -76,6 +73,6 @@ jobs:
                 '{channel:$channel, text:$text}')"
 
             sleep 1
-          done < jobs_canada.tsv
+          done < jobs_global.tsv
 
           echo "✅ Done"
