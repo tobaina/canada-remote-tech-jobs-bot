@@ -3,45 +3,34 @@ name: Post Remote Tech Jobs (Global)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 9 * * *"    # 9:00 UTC
-    - cron: "0 15 * * *"   # 15:00 UTC (second daily run)
+    - cron: "0 9 * * *"
+    - cron: "0 15 * * *"
 
 jobs:
   post_jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Fetch Remotive jobs (Software Dev)
+      - name: Fetch Remotive jobs
         run: |
           set -e
-          echo "Downloading jobs from Remotive..."
           curl -sS -H "Accept: application/json" \
             "https://remotive.com/api/remote-jobs?category=software-dev" \
             -o jobs.json
-
-          echo "Saved jobs.json"
-          echo "First 300 chars:"
-          head -c 300 jobs.json || true
-          echo ""
 
       - name: Validate JSON
         run: |
           set -e
           jq . jobs.json > /dev/null
-          echo "✅ JSON is valid"
-          echo "Total jobs in feed:"
           jq '.jobs | length' jobs.json
 
-      - name: Post jobs to Slack (Global Clean Format)
+      - name: Post to Slack (Safe Version)
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
         run: |
           set -e
 
-          echo "Posting global jobs to Slack..."
-
-          # Extract safe TSV: title, company, location, url
           jq -r '
             .jobs[]
             | [
@@ -51,28 +40,23 @@ jobs:
                 (.url // "")
               ]
             | @tsv
-          ' jobs.json | head -n 10 > jobs_global.tsv
-
-          echo "Top 10 jobs:"
-          cat jobs_global.tsv || true
+          ' jobs.json | head -n 10 > jobs.tsv
 
           while IFS=$'\t' read -r TITLE COMPANY LOCATION URL; do
             [ -z "$TITLE" ] && continue
-
-            MESSAGE="🌍 *${TITLE}*
-🏢 ${COMPANY}
-📍 ${LOCATION}
-🔗 Apply: ${URL}"
 
             curl -sS -X POST "https://slack.com/api/chat.postMessage" \
               -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
               -H "Content-Type: application/json; charset=utf-8" \
               --data "$(jq -n \
                 --arg channel "${SLACK_CHANNEL}" \
-                --arg text "${MESSAGE}" \
-                '{channel:$channel, text:$text}')"
+                --arg title "$TITLE" \
+                --arg company "$COMPANY" \
+                --arg location "$LOCATION" \
+                --arg url "$URL" \
+                '{channel:$channel, text:("🌍 *"+$title+"*\n🏢 "+$company+"\n📍 "+$location+"\n🔗 Apply: "+$url)}')"
 
             sleep 1
-          done < jobs_global.tsv
+          done < jobs.tsv
 
-          echo "✅ Done"
+          echo "Done"
